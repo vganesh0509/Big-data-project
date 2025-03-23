@@ -5,11 +5,17 @@ from database.mongo_config import db  # MongoDB connection
 import jwt
 import subprocess
 import datetime  # Execution logs
+import requests
+import json
+
 
 app = Flask(__name__)
 CORS(app)
 bcrypt = Bcrypt(app)
 app.config["SECRET_KEY"] = "63992f13e7ed15b32438c95f88796b57ddbba7ad997938905a73467b6f77ebb4"
+
+BASE_URL = "http://cci-siscluster1.charlotte.edu:5002/v1/chat/completions"
+MODEL_ID = "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B"
 
 # MongoDB Collections
 users_collection = db["users"]
@@ -60,7 +66,88 @@ def save_workflow():
     print('CURRENT DATA')
     print( data )
     workflows_collection.insert_one(data)
+    print('DATA SAVED');
     return jsonify({"message": "✅ Workflow saved successfully!"}), 201
+
+# ✅ Query DeepSeek AI for PySpark Code
+def query_model(user_input):
+    headers = {"Content-Type": "application/json"}
+    data = {
+        "model": MODEL_ID,
+        "messages": [
+            {"role": "system", "content": "You are a helpful AI assistant that generates PySpark code."},
+            {"role": "user", "content": user_input}
+        ]
+    }
+
+    try:
+        response = requests.post(BASE_URL, headers=headers, data=json.dumps(data))
+        response_json = response.json()
+        return response_json["choices"][0]["message"]["content"]
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+# ✅ Generate PySpark Code Based on Workflow Nodes
+def generate_pyspark_code(nodes, edges):
+    """ Convert workflow into a structured prompt for PySpark code generation. """
+    node_descriptions = []
+    for node in nodes:
+        label = node["data"].get("label", "Unnamed Node")
+        statements = node["data"].get("statements", [])
+        node_text = f"Node: {label}, Statements: {', '.join(statements)}"
+        node_descriptions.append(node_text)
+    
+    edges_description = [f"{edge['source']} → {edge['target']}" for edge in edges]
+    
+    prompt = f"""
+    Generate a PySpark workflow based on the following structure:
+    Nodes:
+    {chr(10).join(node_descriptions)}
+
+    Edges (dependencies between nodes):
+    {chr(10).join(edges_description)}
+
+    Provide the PySpark code that executes these steps sequentially.
+    """
+    
+    return query_model(prompt)
+
+# ✅ Save a New Workflow (Only Instructors)
+@app.route("/api/run_workflow", methods=["POST"])
+def run_workflow():
+    data = request.json
+    workflow = data.get("workflow", {})  # ✅ Extract the workflow dictionary
+    userid = data.get("userid", "unknown_user")  # ✅ Extract userid
+    
+    nodes = workflow.get("nodes", [])  # ✅ Extract nodes from the workflow
+    edges = workflow.get("edges", [])  # ✅ Extract edges from the workflow
+
+    if not nodes or not edges:
+        return jsonify({"error": "❌ Invalid workflow data. Nodes or Edges missing."}), 400
+
+    print(f"✅ Running workflow for user {userid} with {len(nodes)} nodes and {len(edges)} edges.")
+
+    # ✅ Generate PySpark Code from Workflow
+    pyspark_code = generate_pyspark_code(nodes, edges)
+    print("Generated PySpark Code:\n", pyspark_code)
+
+    # ✅ Save workflow execution data to MongoDB
+    workflow_entry = {
+        "userid": userid,
+        "nodes": nodes,
+        "edges": edges,
+        "pyspark_code": pyspark_code,
+        "status": "executed"
+    }
+    # workflows_collection.insert_one(workflow_entry)
+
+    return jsonify({
+        "message": "✅ Workflow executed successfully!",
+        "pyspark_code": pyspark_code
+    }), 201
+
+
 
 # ✅ Get All Workflows (Accessible by Students & Instructors)
 @app.route("/api/workflows", methods=["GET"])
